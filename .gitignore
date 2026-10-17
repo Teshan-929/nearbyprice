@@ -1,0 +1,21 @@
+# Secrets
+.env
+*.pem
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+.next/
+
+# Data and OS
+data/*.csv
+data/*.gz
+pgdata/
+.DS_Store
+.idea/
+.vscode/
