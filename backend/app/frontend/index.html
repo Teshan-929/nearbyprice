@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NearbyPrice</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <style>
+    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+    #map { position: absolute; inset: 0; }
+    #status {
+      position: absolute; top: 10px; left: 10px; z-index: 1;
+      background: #fff; padding: 8px 12px; border-radius: 6px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.3); font-size: 14px;
+    }
+    .pin {
+      width: 14px; height: 14px; border-radius: 50%;
+      background: #2563eb; border: 2px solid #fff;
+      box-shadow: 0 0 3px rgba(0,0,0,.5); cursor: pointer;
+    }
+    .popup h3 { margin: 0 0 4px; font-size: 15px; }
+    .popup p { margin: 2px 0; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div id="status">NearbyPrice: loading…</div>
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script>
+    const statusEl = document.getElementById("status");
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style: {
+        version: 8,
+        sources: {
+          osm: {
+            type: "raster",
+            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+            tileSize: 256,
+            attribution: "© OpenStreetMap contributors"
+          }
+        },
+        layers: [{ id: "osm", type: "raster", source: "osm" }]
+      },
+      center: [13.405, 52.52],   // Berlin
+      zoom: 12
+    });
+    map.addControl(new maplibregl.NavigationControl());
+
+    let markers = [];
+    let timer = null;
+
+    function radiusKm() {
+      const center = map.getCenter();
+      const corner = map.getBounds().getNorthEast();
+      const km = center.distanceTo(corner) / 1000;
+      return Math.min(25, Math.max(0.5, km));
+    }
+
+    function popupContent(p) {
+      // Built with textContent so station names from OSM can never inject HTML.
+      const box = document.createElement("div");
+      box.className = "popup";
+      const title = document.createElement("h3");
+      title.textContent = p.name || "Fuel station";
+      box.appendChild(title);
+      const lines = [
+        p.brand && p.brand !== p.name ? p.brand : null,
+        [p.street, p.city].filter(Boolean).join(", "),
+        `${p.distance_km.toFixed(1)} km from map center`,
+        "Price: not available yet"
+      ];
+      for (const text of lines) {
+        if (!text) continue;
+        const line = document.createElement("p");
+        line.textContent = text;
+        box.appendChild(line);
+      }
+      return box;
+    }
+
+    async function loadPlaces() {
+      if (map.getZoom() < 11) {
+        markers.forEach(m => m.remove());
+        markers = [];
+        statusEl.textContent = "Zoom in to see stations";
+        return;
+      }
+      const c = map.getCenter();
+      const url = `/places/nearby?lat=${c.lat}&lon=${c.lng}` +
+                  `&radius_km=${radiusKm().toFixed(2)}&limit=200`;
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+
+        markers.forEach(m => m.remove());
+        markers = data.places.map(p => {
+          const el = document.createElement("div");
+          el.className = "pin";
+          return new maplibregl.Marker({ element: el })
+            .setLngLat([p.lon, p.lat])
+            .setPopup(new maplibregl.Popup({ offset: 12 }).setDOMContent(popupContent(p)))
+            .addTo(map);
+        });
+        statusEl.textContent = `${data.count} stations in view`;
+      } catch (err) {
+        statusEl.textContent = "Could not load stations: " + err.message;
+      }
+    }
+
+    map.on("load", loadPlaces);
+    map.on("moveend", () => {
+      clearTimeout(timer);
+      timer = setTimeout(loadPlaces, 400);   // wait until the user stops moving
+    });
+  </script>
+</body>
+</html>

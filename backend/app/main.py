@@ -1,8 +1,10 @@
 import os
+from pathlib import Path
 
 import psycopg
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
+from fastapi.staticfiles import StaticFiles
 from psycopg.rows import dict_row
 
 load_dotenv()
@@ -46,3 +48,9 @@ def nearby(
     with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
         rows = conn.execute(sql, params).fetchall()
     return {"count": len(rows), "places": rows}
+
+
+# Serve the map page at /map (same origin as the API, so no CORS setup needed).
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+if FRONTEND_DIR.is_dir():
+    app.mount("/map", StaticFiles(directory=FRONTEND_DIR, html=True), name="map")
