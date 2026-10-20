@@ -33,11 +33,8 @@ def robust_flags(
     return flags, zs, dev
 
 
-def detect(prices: pd.DataFrame, **kwargs):
-    """prices columns: ts, station_id, region, price (one fuel type).
-
-    Returns dict with 'station' and 'region' results, each a (flags, z, dev) tuple.
-    """
+def relative_views(prices: pd.DataFrame):
+    """Return (station_rel, region_rel): prices relative to regional / national medians."""
     wide = prices.pivot(index="ts", columns="station_id", values="price").sort_index()
     region_of = prices.drop_duplicates("station_id").set_index("station_id")["region"]
     regions = region_of.reindex(wide.columns)
@@ -48,7 +45,15 @@ def detect(prices: pd.DataFrame, **kwargs):
     neighbours = region_med.reindex(columns=regions.values).set_axis(wide.columns, axis=1)
     station_rel = wide - neighbours
     region_rel = region_med.sub(national, axis=0)
+    return station_rel, region_rel
 
+
+def detect(prices: pd.DataFrame, **kwargs):
+    """prices columns: ts, station_id, region, price (one fuel type).
+
+    Returns dict with 'station' and 'region' results, each a (flags, z, dev) tuple.
+    """
+    station_rel, region_rel = relative_views(prices)
     return {
         "station": robust_flags(station_rel, **kwargs),
         "region": robust_flags(region_rel, **kwargs),
