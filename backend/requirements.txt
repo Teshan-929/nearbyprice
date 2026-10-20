@@ -3,3 +3,5 @@ uvicorn[standard]==0.32.*
 psycopg[binary]==3.2.*
 requests==2.32.*
 python-dotenv==1.0.*
+pandas>=2.2
+numpy>=2.0
