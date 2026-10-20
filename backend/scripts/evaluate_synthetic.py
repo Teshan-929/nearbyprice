@@ -55,6 +55,7 @@ def score(flags: pd.DataFrame, events: pd.DataFrame, grace_steps: int = 2):
         precision=(n_eps - fp_eps) / max(n_eps, 1),
         median_delay_min=float(np.median(delays)) if delays else float("nan"),
         recall_by_magnitude={m: sum(v) / len(v) for m, v in sorted(by_mag.items())},
+        mag_counts={m: (sum(v), len(v)) for m, v in sorted(by_mag.items())},
     )
 
 
