@@ -33,19 +33,20 @@ def robust_flags(
     return flags, zs, dev
 
 
+def relative_views_from_wide(wide: pd.DataFrame, region_of):
+    """wide: timestamp x station prices. region_of: mapping station -> region."""
+    regions = pd.Series(region_of).reindex(wide.columns)
+    region_med = wide.T.groupby(regions.values).median().T          # ts x region
+    national = wide.median(axis=1)
+    neighbours = region_med.reindex(columns=regions.values).set_axis(wide.columns, axis=1)
+    return wide - neighbours, region_med.sub(national, axis=0)
+
+
 def relative_views(prices: pd.DataFrame):
     """Return (station_rel, region_rel): prices relative to regional / national medians."""
     wide = prices.pivot(index="ts", columns="station_id", values="price").sort_index()
     region_of = prices.drop_duplicates("station_id").set_index("station_id")["region"]
-    regions = region_of.reindex(wide.columns)
-
-    region_med = wide.T.groupby(regions.values).median().T          # ts x region
-    national = wide.median(axis=1)
-
-    neighbours = region_med.reindex(columns=regions.values).set_axis(wide.columns, axis=1)
-    station_rel = wide - neighbours
-    region_rel = region_med.sub(national, axis=0)
-    return station_rel, region_rel
+    return relative_views_from_wide(wide, region_of)
 
 
 def detect(prices: pd.DataFrame, **kwargs):

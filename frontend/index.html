@@ -8,27 +8,71 @@
   <style>
     html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
     #map { position: absolute; inset: 0; }
-    #status {
-      position: absolute; top: 10px; left: 10px; z-index: 1;
-      background: #fff; padding: 8px 12px; border-radius: 6px;
-      box-shadow: 0 1px 4px rgba(0,0,0,.3); font-size: 14px;
+    .panel {
+      position: absolute; z-index: 1; background: #fff; border-radius: 6px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.3); padding: 8px 12px; font-size: 14px;
     }
-    .pin {
-      width: 14px; height: 14px; border-radius: 50%;
-      background: #2563eb; border: 2px solid #fff;
-      box-shadow: 0 0 3px rgba(0,0,0,.5); cursor: pointer;
+    #top { top: 10px; left: 10px; }
+    #top select { margin-left: 6px; font-size: 14px; }
+    #demo {
+      display: none; margin-top: 6px; padding: 4px 8px; border-radius: 4px;
+      background: #fef3c7; color: #92400e; font-size: 12px; font-weight: 600;
     }
+    #cheapest { bottom: 28px; left: 10px; max-width: 260px; max-height: 40%; overflow: auto; }
+    #cheapest h4 { margin: 0 0 6px; font-size: 13px; }
+    #cheapest ol { margin: 0; padding-left: 20px; }
+    #cheapest li { margin: 3px 0; cursor: pointer; font-size: 13px; }
+    #cheapest li:hover { text-decoration: underline; }
+    #legend { bottom: 28px; right: 10px; font-size: 12px; }
+    .bar {
+      width: 120px; height: 8px; border-radius: 4px; margin: 4px 0 2px;
+      background: linear-gradient(to right, hsl(120,65%,38%), hsl(60,65%,38%), hsl(0,65%,38%));
+    }
+    .bar-labels { display: flex; justify-content: space-between; }
+    .ring { display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+            outline: 3px solid #7c3aed; background: #888; margin: 0 6px 0 3px; }
+    .pill {
+      color: #fff; font-size: 12px; font-weight: 600; padding: 2px 7px;
+      border-radius: 10px; border: 2px solid #fff; box-shadow: 0 0 3px rgba(0,0,0,.5);
+      cursor: pointer; white-space: nowrap;
+    }
+    .pill.alert { outline: 3px solid #7c3aed; }
+    .pill.none { background: #6b7280; }
     .popup h3 { margin: 0 0 4px; font-size: 15px; }
-    .popup p { margin: 2px 0; font-size: 13px; }
+    .popup p { margin: 3px 0; font-size: 13px; }
+    .popup .price { font-size: 16px; font-weight: 700; }
+    .popup .flag {
+      margin-top: 6px; padding: 6px 8px; border-radius: 4px; font-size: 12px;
+      background: #ede9fe; color: #4c1d95;
+    }
   </style>
 </head>
 <body>
-  <div id="status">NearbyPrice: loading…</div>
+  <div id="top" class="panel">
+    <span id="status">NearbyPrice: loading…</span>
+    <label>Fuel
+      <select id="fuel">
+        <option value="e5">Super E5</option>
+        <option value="e10">Super E10</option>
+        <option value="diesel">Diesel</option>
+      </select>
+    </label>
+    <div id="demo">Demo data: prices are simulated, not real.</div>
+  </div>
+  <div id="cheapest" class="panel"><h4>Cheapest in view</h4><ol id="cheapList"></ol></div>
+  <div id="legend" class="panel">
+    <div>Price in view</div>
+    <div class="bar"></div>
+    <div class="bar-labels"><span id="lo">cheap</span><span id="hi">dear</span></div>
+    <div style="margin-top:6px"><span class="ring"></span>Unusual price jump</div>
+  </div>
   <div id="map"></div>
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script>
     const statusEl = document.getElementById("status");
+    const fuelEl = document.getElementById("fuel");
+    const demoEl = document.getElementById("demo");
 
     const map = new maplibregl.Map({
       container: "map",
@@ -44,77 +88,140 @@
         },
         layers: [{ id: "osm", type: "raster", source: "osm" }]
       },
-      center: [13.405, 52.52],   // Berlin
+      center: [13.405, 52.52],
       zoom: 12
     });
     map.addControl(new maplibregl.NavigationControl());
 
-    let markers = [];
+    let markers = [];          // { marker, place }
     let timer = null;
 
     function radiusKm() {
-      const center = map.getCenter();
-      const corner = map.getBounds().getNorthEast();
-      const km = center.distanceTo(corner) / 1000;
+      const km = map.getCenter().distanceTo(map.getBounds().getNorthEast()) / 1000;
       return Math.min(25, Math.max(0.5, km));
     }
 
+    function percentile(sorted, q) {
+      if (!sorted.length) return 0;
+      return sorted[Math.min(sorted.length - 1, Math.floor(q * (sorted.length - 1)))];
+    }
+
+    function colorFor(price, lo, hi) {
+      const t = hi > lo ? Math.min(1, Math.max(0, (price - lo) / (hi - lo))) : 0.5;
+      return `hsl(${Math.round(120 * (1 - t))}, 65%, 38%)`;
+    }
+
+    function ageText(iso) {
+      const m = Math.round((Date.now() - new Date(iso)) / 60000);
+      if (m < 1) return "just now";
+      if (m < 60) return `${m} min ago`;
+      const h = Math.round(m / 60);
+      return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
+    }
+
+    function addLine(box, text, cls) {
+      const el = document.createElement("p");
+      if (cls) el.className = cls;
+      el.textContent = text;       // textContent: OSM names can never inject HTML
+      box.appendChild(el);
+      return el;
+    }
+
     function popupContent(p) {
-      // Built with textContent so station names from OSM can never inject HTML.
       const box = document.createElement("div");
       box.className = "popup";
       const title = document.createElement("h3");
       title.textContent = p.name || "Fuel station";
       box.appendChild(title);
-      const lines = [
-        p.brand && p.brand !== p.name ? p.brand : null,
-        [p.street, p.city].filter(Boolean).join(", "),
-        `${p.distance_km.toFixed(1)} km from map center`,
-        "Price: not available yet"
-      ];
-      for (const text of lines) {
-        if (!text) continue;
-        const line = document.createElement("p");
-        line.textContent = text;
-        box.appendChild(line);
+      if (p.brand && p.brand !== p.name) addLine(box, p.brand);
+      addLine(box, [p.street, p.city].filter(Boolean).join(", "));
+      if (p.price != null) {
+        addLine(box, `${fuelEl.options[fuelEl.selectedIndex].text}: ${Number(p.price).toFixed(3)} €`, "price");
+        addLine(box, `Updated ${ageText(p.price_at)}${p.price_source === "simulated" ? " (simulated)" : ""}`);
+      } else {
+        addLine(box, "No price available yet");
       }
+      if (p.alert_kind && p.alert_evidence) {
+        const e = p.alert_evidence;
+        const dir = e.deviation_eur >= 0 ? "higher" : "lower";
+        const flag = addLine(box,
+          `Unusual price: ${Math.abs(e.deviation_eur).toFixed(2)} € ${dir} than usual compared with ` +
+          `nearby stations (neighbourhood median ${Number(e.region_median).toFixed(3)} €, score ${e.z}). ` +
+          `This is a statistical flag, not proof of overcharging.`, "flag");
+      }
+      addLine(box, `${p.distance_km.toFixed(1)} km from map center`);
       return box;
+    }
+
+    function renderCheapest(entries) {
+      const list = document.getElementById("cheapList");
+      list.replaceChildren();
+      const top = entries.filter(e => e.place.price != null)
+                         .sort((a, b) => a.place.price - b.place.price).slice(0, 5);
+      for (const e of top) {
+        const li = document.createElement("li");
+        li.textContent = `${Number(e.place.price).toFixed(3)} € ${e.place.name || "Station"}`;
+        li.onclick = () => {
+          map.flyTo({ center: [e.place.lon, e.place.lat], zoom: Math.max(map.getZoom(), 14) });
+          if (!e.marker.getPopup().isOpen()) e.marker.togglePopup();
+        };
+        list.appendChild(li);
+      }
+      if (!top.length) list.textContent = "No prices in view.";
     }
 
     async function loadPlaces() {
       if (map.getZoom() < 11) {
-        markers.forEach(m => m.remove());
+        markers.forEach(m => m.marker.remove());
         markers = [];
         statusEl.textContent = "Zoom in to see stations";
         return;
       }
       const c = map.getCenter();
       const url = `/places/nearby?lat=${c.lat}&lon=${c.lng}` +
-                  `&radius_km=${radiusKm().toFixed(2)}&limit=200`;
+                  `&radius_km=${radiusKm().toFixed(2)}&limit=200&fuel=${fuelEl.value}`;
       try {
         const res = await fetch(url);
         if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
 
-        markers.forEach(m => m.remove());
+        const sorted = data.places.filter(p => p.price != null).map(p => Number(p.price)).sort((a, b) => a - b);
+        const lo = percentile(sorted, 0.1), hi = percentile(sorted, 0.9);
+        document.getElementById("lo").textContent = sorted.length ? lo.toFixed(2) + " €" : "cheap";
+        document.getElementById("hi").textContent = sorted.length ? hi.toFixed(2) + " €" : "dear";
+        demoEl.style.display = data.places.some(p => p.price_source === "simulated") ? "block" : "none";
+
+        markers.forEach(m => m.marker.remove());
         markers = data.places.map(p => {
           const el = document.createElement("div");
-          el.className = "pin";
-          return new maplibregl.Marker({ element: el })
+          el.className = "pill";
+          if (p.price != null) {
+            el.style.background = colorFor(Number(p.price), lo, hi);
+            el.textContent = (p.alert_kind ? "⚠ " : "") + Number(p.price).toFixed(2);
+          } else {
+            el.classList.add("none");
+            el.textContent = "–";
+          }
+          if (p.alert_kind) el.classList.add("alert");
+          const marker = new maplibregl.Marker({ element: el })
             .setLngLat([p.lon, p.lat])
-            .setPopup(new maplibregl.Popup({ offset: 12 }).setDOMContent(popupContent(p)))
+            .setPopup(new maplibregl.Popup({ offset: 14 }).setDOMContent(popupContent(p)))
             .addTo(map);
+          return { marker, place: p };
         });
-        statusEl.textContent = `${data.count} stations in view`;
+        const flagged = data.places.filter(p => p.alert_kind).length;
+        statusEl.textContent = `${data.count} stations` + (flagged ? `, ${flagged} flagged` : "");
+        renderCheapest(markers);
       } catch (err) {
         statusEl.textContent = "Could not load stations: " + err.message;
       }
     }
 
+    fuelEl.addEventListener("change", loadPlaces);
     map.on("load", loadPlaces);
     map.on("moveend", () => {
       clearTimeout(timer);
-      timer = setTimeout(loadPlaces, 400);   // wait until the user stops moving
+      timer = setTimeout(loadPlaces, 400);
     });
   </script>
 </body>

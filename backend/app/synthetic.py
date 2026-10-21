@@ -83,3 +83,42 @@ def make_synthetic(
     long.columns = ["ts", "station_id", "price"]
     long["region"] = long["station_id"].map(region_of)
     return long[["ts", "station_id", "region", "price"]], pd.DataFrame(events)
+
+
+def simulate_market(region_of: dict, ts: pd.DatetimeIndex, seed: int = 7, live_spikes: int = 4):
+    """Simulate E5 prices for given stations (dict station_id -> region) on timestamps ts.
+
+    The last few hours of `live_spikes` random stations are raised by 12-25 cents so a
+    demo map has something to flag. Returns (wide prices DataFrame, list of injected spikes).
+    """
+    rng = np.random.default_rng(seed)
+    ids = list(region_of)
+    step_min = int((ts[1] - ts[0]).total_seconds() // 60)
+    steps_per_day = 24 * 60 // step_min
+    n_days = len(ts) // steps_per_day + 1
+    day_idx = np.arange(len(ts)) // steps_per_day
+    local = ts.tz_convert("Europe/Berlin") if ts.tz is not None else ts
+    hours = (local.hour + local.minute / 60).to_numpy()
+
+    drift = np.cumsum(rng.normal(0, 0.008, n_days))[day_idx]
+    regions = sorted(set(region_of.values()))
+    region_offset = dict(zip(regions, rng.normal(0, 0.02, len(regions))))
+
+    prices = np.empty((len(ts), len(ids)))
+    for j, sid in enumerate(ids):
+        shift_h, amp = rng.normal(0, 1.5), rng.uniform(0.6, 1.4)
+        cycle = amp * 0.05 * np.cos(2 * np.pi * (hours - 8 - shift_h) / 24)
+        walk = np.cumsum(rng.normal(0, 0.006, n_days))[day_idx]
+        prices[:, j] = (1.80 + drift + cycle + walk + region_offset[region_of[sid]]
+                        + rng.normal(0, 0.015) + rng.normal(0, 0.012, len(ts)))
+
+    injected = []
+    if live_spikes:
+        for j in rng.choice(len(ids), size=min(live_spikes, len(ids)), replace=False):
+            dur = int(rng.integers(6 * 60 // step_min, 10 * 60 // step_min + 1))
+            mag = float(rng.choice([0.12, 0.15, 0.20, 0.25]))
+            prices[-dur:, j] += mag
+            injected.append(dict(station_id=ids[j], magnitude=mag, hours=dur * step_min / 60))
+
+    wide = pd.DataFrame(np.round(prices, 2) - 0.001, index=ts, columns=ids)  # x.x9 style
+    return wide, injected
