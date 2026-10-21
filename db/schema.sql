@@ -35,13 +35,18 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
-  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  place_id   UUID NOT NULL REFERENCES places(id) ON DELETE CASCADE,
-  user_id    UUID NOT NULL REFERENCES users(id),
-  ratings    JSONB NOT NULL,             -- {"queue":4,"cleanliness":5,...}
-  comment    TEXT,
-  created_at TIMESTAMPTZ DEFAULT now()
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  place_id      UUID NOT NULL REFERENCES places(id) ON DELETE CASCADE,
+  user_id       UUID REFERENCES users(id),   -- unused until real accounts exist
+  reviewer_hash TEXT,                        -- SHA-256 of a browser token (prototype)
+  overall       SMALLINT CHECK (overall BETWEEN 1 AND 5),
+  ratings       JSONB NOT NULL DEFAULT '{}'::jsonb,  -- {"queue":4,"cleanliness":5,...}
+  comment       TEXT,
+  is_demo       BOOLEAN NOT NULL DEFAULT false,
+  created_at    TIMESTAMPTZ DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS reviews_place_idx ON reviews (place_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS reviews_reviewer_idx ON reviews (reviewer_hash, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS alerts (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),

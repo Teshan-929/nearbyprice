@@ -18,11 +18,13 @@
       display: none; margin-top: 6px; padding: 4px 8px; border-radius: 4px;
       background: #fef3c7; color: #92400e; font-size: 12px; font-weight: 600;
     }
-    #cheapest { bottom: 28px; left: 10px; max-width: 260px; max-height: 40%; overflow: auto; }
-    #cheapest h4 { margin: 0 0 6px; font-size: 13px; }
-    #cheapest ol { margin: 0; padding-left: 20px; }
-    #cheapest li { margin: 3px 0; cursor: pointer; font-size: 13px; }
-    #cheapest li:hover { text-decoration: underline; }
+    #picks { bottom: 28px; left: 10px; width: 280px; max-height: 45%; overflow: auto; }
+    #picks h4 { margin: 0 0 6px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+    #picks select { font-size: 12px; }
+    #picks ol { margin: 0; padding-left: 20px; }
+    #picks li { margin: 5px 0; cursor: pointer; font-size: 13px; }
+    #picks li:hover .t { text-decoration: underline; }
+    #picks .why { display: block; color: #555; font-size: 11px; }
     #legend { bottom: 28px; right: 10px; font-size: 12px; }
     .bar {
       width: 120px; height: 8px; border-radius: 4px; margin: 4px 0 2px;
@@ -41,10 +43,19 @@
     .popup h3 { margin: 0 0 4px; font-size: 15px; }
     .popup p { margin: 3px 0; font-size: 13px; }
     .popup .price { font-size: 16px; font-weight: 700; }
+    .popup .rating { font-weight: 600; }
     .popup .flag {
       margin-top: 6px; padding: 6px 8px; border-radius: 4px; font-size: 12px;
       background: #ede9fe; color: #4c1d95;
     }
+    .popup .actions { margin-top: 8px; display: flex; gap: 6px; }
+    .popup button { font-size: 12px; padding: 4px 8px; cursor: pointer; }
+    .popup .rev { border-top: 1px solid #ddd; margin-top: 6px; padding-top: 4px; font-size: 12px; }
+    .popup .rev .sub { color: #666; }
+    .popup form { margin-top: 8px; font-size: 12px; }
+    .popup form label { display: flex; justify-content: space-between; align-items: center; margin: 3px 0; }
+    .popup form textarea { width: 100%; box-sizing: border-box; margin-top: 4px; font-size: 12px; }
+    .popup .msg { font-size: 12px; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -57,9 +68,19 @@
         <option value="diesel">Diesel</option>
       </select>
     </label>
-    <div id="demo">Demo data: prices are simulated, not real.</div>
+    <div id="demo">Demo data: prices and ratings are simulated, not real.</div>
   </div>
-  <div id="cheapest" class="panel"><h4>Cheapest in view</h4><ol id="cheapList"></ol></div>
+  <div id="picks" class="panel">
+    <h4>Best picks in view
+      <select id="rankMode">
+        <option value="balanced">Balanced</option>
+        <option value="cheapest">Cheapest</option>
+        <option value="rated">Best rated</option>
+        <option value="closest">Closest</option>
+      </select>
+    </h4>
+    <ol id="pickList"></ol>
+  </div>
   <div id="legend" class="panel">
     <div>Price in view</div>
     <div class="bar"></div>
@@ -70,8 +91,43 @@
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script>
+    // RANKING-START
+    const PRESETS = {
+      balanced: { price: 0.5, rating: 0.3, dist: 0.2 },
+      cheapest: { price: 0.8, rating: 0.1, dist: 0.1 },
+      rated:    { price: 0.2, rating: 0.7, dist: 0.1 },
+      closest:  { price: 0.2, rating: 0.1, dist: 0.7 }
+    };
+    const PRIOR = 3.8, PRIOR_WEIGHT = 10;      // pulls places with few reviews toward the average
+    const clamp01 = x => Math.min(1, Math.max(0, x));
+
+    function bayesRating(avg, n) {
+      return (n * (avg || 0) + PRIOR_WEIGHT * PRIOR) / (n + PRIOR_WEIGHT);
+    }
+
+    function rankPlaces(places, weights) {
+      const priced = places.filter(p => p.price != null);
+      if (!priced.length) return [];
+      const sorted = priced.map(p => Number(p.price)).sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      return priced.map(p => {
+        const diff = Number(p.price) - median;
+        const n = p.rating_count || 0;
+        const rating = bayesRating(p.rating_avg, n);
+        const parts = {
+          price: clamp01(0.5 - 8 * diff / median),     // median = 0.5, cheaper -> up to 1
+          rating: clamp01((rating - 1) / 4),           // 1 star = 0, 5 stars = 1
+          dist: clamp01(1 - p.distance_km / 10)        // 0 km = 1, 10+ km = 0
+        };
+        const score = weights.price * parts.price + weights.rating * parts.rating + weights.dist * parts.dist;
+        return { place: p, score, parts, diffCents: diff * 100, ratingAdj: rating };
+      }).sort((a, b) => b.score - a.score);
+    }
+    // RANKING-END
+
     const statusEl = document.getElementById("status");
     const fuelEl = document.getElementById("fuel");
+    const modeEl = document.getElementById("rankMode");
     const demoEl = document.getElementById("demo");
 
     const map = new maplibregl.Map({
@@ -92,9 +148,21 @@
       zoom: 12
     });
     map.addControl(new maplibregl.NavigationControl());
+    map.addControl(new maplibregl.GeolocateControl({ trackUserLocation: false }));
 
     let markers = [];          // { marker, place }
+    let lastPlaces = [];
     let timer = null;
+
+    function reviewerToken() {
+      let t = null;
+      try { t = localStorage.getItem("np_reviewer"); } catch (e) {}
+      if (!t) {
+        t = (crypto.randomUUID ? crypto.randomUUID() : Date.now() + "-" + Math.random().toString(16).slice(2));
+        try { localStorage.setItem("np_reviewer", t); } catch (e) {}
+      }
+      return t;
+    }
 
     function radiusKm() {
       const km = map.getCenter().distanceTo(map.getBounds().getNorthEast()) / 1000;
@@ -107,7 +175,7 @@
     }
 
     function colorFor(price, lo, hi) {
-      const t = hi > lo ? Math.min(1, Math.max(0, (price - lo) / (hi - lo))) : 0.5;
+      const t = hi > lo ? clamp01((price - lo) / (hi - lo)) : 0.5;
       return `hsl(${Math.round(120 * (1 - t))}, 65%, 38%)`;
     }
 
@@ -116,65 +184,161 @@
       if (m < 1) return "just now";
       if (m < 60) return `${m} min ago`;
       const h = Math.round(m / 60);
-      return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
+      if (h < 48) return `${h} h ago`;
+      const d = Math.round(h / 24);
+      return d < 60 ? `${d} days ago` : `${Math.round(d / 30)} months ago`;
     }
 
-    function addLine(box, text, cls) {
-      const el = document.createElement("p");
+    // All text goes in with textContent, so names and comments can never inject HTML.
+    function mk(tag, text, cls) {
+      const el = document.createElement(tag);
       if (cls) el.className = cls;
-      el.textContent = text;       // textContent: OSM names can never inject HTML
-      box.appendChild(el);
+      if (text != null) el.textContent = text;
       return el;
     }
 
-    function popupContent(p) {
-      const box = document.createElement("div");
-      box.className = "popup";
-      const title = document.createElement("h3");
-      title.textContent = p.name || "Fuel station";
-      box.appendChild(title);
-      if (p.brand && p.brand !== p.name) addLine(box, p.brand);
-      addLine(box, [p.street, p.city].filter(Boolean).join(", "));
-      if (p.price != null) {
-        addLine(box, `${fuelEl.options[fuelEl.selectedIndex].text}: ${Number(p.price).toFixed(3)} €`, "price");
-        addLine(box, `Updated ${ageText(p.price_at)}${p.price_source === "simulated" ? " (simulated)" : ""}`);
-      } else {
-        addLine(box, "No price available yet");
+    function ratingText(count, avg, demo) {
+      if (!count) return "No reviews yet";
+      return `★ ${avg.toFixed(1)} (${count} review${count === 1 ? "" : "s"})${demo ? " · demo" : ""}`;
+    }
+
+    const SUB_LABELS = { queue: "Queue time", cleanliness: "Cleanliness", service: "Service", pumps: "Pumps working" };
+
+    function renderReviews(box, data) {
+      box.replaceChildren();
+      if (!data.reviews.length) { box.appendChild(mk("p", "No reviews yet. Be the first!")); return; }
+      for (const r of data.reviews) {
+        const row = mk("div", null, "rev");
+        row.appendChild(mk("div", `${"★".repeat(r.overall)}${"☆".repeat(5 - r.overall)} · ${ageText(r.created_at)}${r.is_demo ? " · demo" : ""}`));
+        const subs = Object.entries(r.ratings || {}).map(([k, v]) => `${SUB_LABELS[k] || k}: ${v}/5`).join(" · ");
+        if (subs) row.appendChild(mk("div", subs, "sub"));
+        if (r.comment) row.appendChild(mk("div", r.comment));
+        box.appendChild(row);
       }
+    }
+
+    function buildForm(p, onDone) {
+      const form = document.createElement("form");
+      const stars = [["5", "5 – Excellent"], ["4", "4 – Good"], ["3", "3 – OK"], ["2", "2 – Poor"], ["1", "1 – Bad"]];
+      const select = (name, optional) => {
+        const s = document.createElement("select");
+        s.name = name;
+        if (optional) s.appendChild(new Option("–", ""));
+        for (const [v, t] of stars) s.appendChild(new Option(t, v));
+        if (!optional) s.value = "4";
+        return s;
+      };
+      const row = (label, el) => { const l = mk("label", label); l.appendChild(el); form.appendChild(l); };
+      row("Overall", select("overall", false));
+      for (const [k, label] of Object.entries(SUB_LABELS)) row(label, select(k, true));
+      const comment = mk("textarea");
+      comment.name = "comment"; comment.rows = 2; comment.maxLength = 500;
+      comment.placeholder = "Optional comment (max 500 characters)";
+      form.appendChild(comment);
+      const submit = mk("button", "Submit review"); submit.type = "submit";
+      form.appendChild(submit);
+      const msg = mk("div", null, "msg"); form.appendChild(msg);
+
+      form.addEventListener("submit", async ev => {
+        ev.preventDefault();
+        const ratings = {};
+        for (const k of Object.keys(SUB_LABELS)) if (form.elements[k].value) ratings[k] = Number(form.elements[k].value);
+        submit.disabled = true; msg.textContent = "Sending…";
+        try {
+          const res = await fetch(`/places/${p.id}/reviews`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Reviewer-Token": reviewerToken() },
+            body: JSON.stringify({ overall: Number(form.elements.overall.value), ratings, comment: comment.value })
+          });
+          if (res.status === 201) { msg.textContent = "Thanks! Your review was added."; setTimeout(onDone, 900); return; }
+          const body = await res.json().catch(() => ({}));
+          msg.textContent = typeof body.detail === "string" ? body.detail : "Could not save the review. Check your input.";
+        } catch (err) {
+          msg.textContent = "Network error: " + err.message;
+        }
+        submit.disabled = false;
+      });
+      return form;
+    }
+
+    function popupContent(p) {
+      const box = mk("div", null, "popup");
+      box.appendChild(mk("h3", p.name || "Fuel station"));
+      if (p.brand && p.brand !== p.name) box.appendChild(mk("p", p.brand));
+      box.appendChild(mk("p", [p.street, p.city].filter(Boolean).join(", ")));
+      if (p.price != null) {
+        box.appendChild(mk("p", `${fuelEl.options[fuelEl.selectedIndex].text}: ${Number(p.price).toFixed(3)} €`, "price"));
+        box.appendChild(mk("p", `Updated ${ageText(p.price_at)}${p.price_source === "simulated" ? " (simulated)" : ""}`));
+      } else {
+        box.appendChild(mk("p", "No price available yet"));
+      }
+      box.appendChild(mk("p", ratingText(p.rating_count, p.rating_avg, p.rating_demo), "rating"));
       if (p.alert_kind && p.alert_evidence) {
         const e = p.alert_evidence;
         const dir = e.deviation_eur >= 0 ? "higher" : "lower";
-        const flag = addLine(box,
+        box.appendChild(mk("p",
           `Unusual price: ${Math.abs(e.deviation_eur).toFixed(2)} € ${dir} than usual compared with ` +
           `nearby stations (neighbourhood median ${Number(e.region_median).toFixed(3)} €, score ${e.z}). ` +
-          `This is a statistical flag, not proof of overcharging.`, "flag");
+          `This is a statistical flag, not proof of overcharging.`, "flag"));
       }
-      addLine(box, `${p.distance_km.toFixed(1)} km from map center`);
+      box.appendChild(mk("p", `${p.distance_km.toFixed(1)} km from map center`));
+
+      const actions = mk("div", null, "actions");
+      const revBtn = mk("button", "Reviews"), writeBtn = mk("button", "Write a review");
+      revBtn.type = writeBtn.type = "button";
+      actions.append(revBtn, writeBtn);
+      box.appendChild(actions);
+      const revBox = mk("div"), formBox = mk("div");
+      revBox.hidden = formBox.hidden = true;
+      box.append(revBox, formBox);
+
+      let loaded = false;
+      revBtn.onclick = async () => {
+        revBox.hidden = !revBox.hidden;
+        if (revBox.hidden || loaded) return;
+        revBox.textContent = "Loading…";
+        try {
+          const res = await fetch(`/places/${p.id}/reviews`);
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          renderReviews(revBox, await res.json());
+          loaded = true;
+        } catch (err) { revBox.textContent = "Could not load reviews: " + err.message; }
+      };
+      writeBtn.onclick = () => {
+        if (!formBox.childElementCount) formBox.appendChild(buildForm(p, loadPlaces));
+        formBox.hidden = !formBox.hidden;
+      };
       return box;
     }
 
-    function renderCheapest(entries) {
-      const list = document.getElementById("cheapList");
+    function renderPicks() {
+      const list = document.getElementById("pickList");
       list.replaceChildren();
-      const top = entries.filter(e => e.place.price != null)
-                         .sort((a, b) => a.place.price - b.place.price).slice(0, 5);
-      for (const e of top) {
-        const li = document.createElement("li");
-        li.textContent = `${Number(e.place.price).toFixed(3)} € ${e.place.name || "Station"}`;
+      const ranked = rankPlaces(lastPlaces, PRESETS[modeEl.value]).slice(0, 5);
+      for (const r of ranked) {
+        const p = r.place;
+        const li = mk("li");
+        li.appendChild(mk("span", `${Number(p.price).toFixed(3)} € ${p.name || "Station"}`, "t"));
+        const ct = Math.round(Math.abs(r.diffCents));
+        const price = ct === 0 ? "at median price" : `${ct} ct ${r.diffCents < 0 ? "below" : "above"} median`;
+        const rating = p.rating_count ? `★ ${p.rating_avg.toFixed(1)} (${p.rating_count})` : "no ratings";
+        li.appendChild(mk("span", `${price} · ${rating} · ${p.distance_km.toFixed(1)} km`, "why"));
         li.onclick = () => {
-          map.flyTo({ center: [e.place.lon, e.place.lat], zoom: Math.max(map.getZoom(), 14) });
-          if (!e.marker.getPopup().isOpen()) e.marker.togglePopup();
+          map.flyTo({ center: [p.lon, p.lat], zoom: Math.max(map.getZoom(), 14) });
+          const m = markers.find(x => x.place.id === p.id);
+          if (m && !m.marker.getPopup().isOpen()) m.marker.togglePopup();
         };
         list.appendChild(li);
       }
-      if (!top.length) list.textContent = "No prices in view.";
+      if (!ranked.length) list.textContent = "No prices in view.";
     }
 
     async function loadPlaces() {
       if (map.getZoom() < 11) {
         markers.forEach(m => m.marker.remove());
-        markers = [];
+        markers = []; lastPlaces = [];
         statusEl.textContent = "Zoom in to see stations";
+        renderPicks();
         return;
       }
       const c = map.getCenter();
@@ -184,12 +348,13 @@
         const res = await fetch(url);
         if (!res.ok) throw new Error("HTTP " + res.status);
         const data = await res.json();
+        lastPlaces = data.places;
 
         const sorted = data.places.filter(p => p.price != null).map(p => Number(p.price)).sort((a, b) => a - b);
         const lo = percentile(sorted, 0.1), hi = percentile(sorted, 0.9);
         document.getElementById("lo").textContent = sorted.length ? lo.toFixed(2) + " €" : "cheap";
         document.getElementById("hi").textContent = sorted.length ? hi.toFixed(2) + " €" : "dear";
-        demoEl.style.display = data.places.some(p => p.price_source === "simulated") ? "block" : "none";
+        demoEl.style.display = data.places.some(p => p.price_source === "simulated" || p.rating_demo) ? "block" : "none";
 
         markers.forEach(m => m.marker.remove());
         markers = data.places.map(p => {
@@ -205,19 +370,20 @@
           if (p.alert_kind) el.classList.add("alert");
           const marker = new maplibregl.Marker({ element: el })
             .setLngLat([p.lon, p.lat])
-            .setPopup(new maplibregl.Popup({ offset: 14 }).setDOMContent(popupContent(p)))
+            .setPopup(new maplibregl.Popup({ offset: 14, maxWidth: "300px" }).setDOMContent(popupContent(p)))
             .addTo(map);
           return { marker, place: p };
         });
         const flagged = data.places.filter(p => p.alert_kind).length;
         statusEl.textContent = `${data.count} stations` + (flagged ? `, ${flagged} flagged` : "");
-        renderCheapest(markers);
+        renderPicks();
       } catch (err) {
         statusEl.textContent = "Could not load stations: " + err.message;
       }
     }
 
     fuelEl.addEventListener("change", loadPlaces);
+    modeEl.addEventListener("change", renderPicks);
     map.on("load", loadPlaces);
     map.on("moveend", () => {
       clearTimeout(timer);
