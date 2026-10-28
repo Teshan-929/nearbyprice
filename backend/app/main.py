@@ -61,10 +61,15 @@ def nearby(
                    COALESCE(bool_or(r.is_demo), false) AS demo
             FROM reviews r WHERE r.place_id = p.id
         ) rv ON true
-        WHERE p.category = %(category)s
+                WHERE p.category = %(category)s
           AND ST_DWithin(p.geom, c.pt, %(radius_m)s)
-        ORDER BY distance_km
-        LIMIT %(limit)s
+          AND NOT (
+              p.source = 'osm' AND EXISTS (
+                  SELECT 1 FROM places t
+                  WHERE t.source = 'tankerkoenig' AND t.category = p.category
+                    AND ST_DWithin(t.geom, p.geom, 75)
+              )
+          )
     """
     params = {
         "lat": lat, "lon": lon, "category": category, "fuel": fuel,
